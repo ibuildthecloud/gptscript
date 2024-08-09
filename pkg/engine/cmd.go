@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/shlex"
 	"github.com/gptscript-ai/gptscript/pkg/counter"
 	"github.com/gptscript-ai/gptscript/pkg/env"
 	"github.com/gptscript-ai/gptscript/pkg/types"
@@ -119,7 +120,7 @@ func (e *Engine) runCommand(ctx Context, tool types.Tool, input string, toolCate
 	var extraEnv = []string{
 		strings.TrimSpace("GPTSCRIPT_CONTEXT=" + strings.Join(instructions, "\n")),
 	}
-	cmd, stop, err := e.newCommand(ctx.Ctx, extraEnv, tool, input)
+	cmd, stop, err := e.newCommand(ctx.Ctx, extraEnv, tool, input, true)
 	if err != nil {
 		if toolCategory == NoCategory {
 			return fmt.Sprintf("ERROR: got (%v) while parsing command", err), nil
@@ -242,7 +243,7 @@ func appendInputAsEnv(env []string, input string) []string {
 	return env
 }
 
-func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.Tool, input string) (*exec.Cmd, func(), error) {
+func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.Tool, input string, useShell bool) (*exec.Cmd, func(), error) {
 	envvars := append(e.Env[:], extraEnv...)
 	envvars = appendInputAsEnv(envvars, input)
 	if log.IsDebug() {
@@ -252,9 +253,20 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 	interpreter, rest, _ := strings.Cut(tool.Instructions, "\n")
 	interpreter = strings.TrimSpace(interpreter)[2:]
 
-	args := strings.Fields(interpreter)
+	var (
+		args []string
+		err  error
+	)
+	if useShell {
+		args = strings.Fields(interpreter)
+	} else {
+		args, err = shlex.Split(interpreter)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
-	envvars, err := e.getRuntimeEnv(ctx, tool, args, envvars)
+	envvars, err = e.getRuntimeEnv(ctx, tool, args, envvars)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -297,6 +309,9 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 			if strings.HasPrefix(s, "!") {
 				return envMap[s[1:]]
 			}
+			if !useShell {
+				return envMap[s]
+			}
 			if runtime.GOOS == "windows" {
 				return "%" + s + "%"
 			}
@@ -306,9 +321,14 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 
 	if runtime.GOOS == "windows" {
 		args[0] = strings.ReplaceAll(args[0], "/", "\\")
-		args = append([]string{"cmd.exe", "/c"}, strings.Join(args, " "))
-	} else {
-		args = append([]string{"/bin/sh", "-c"}, strings.Join(args, " "))
+	}
+
+	if useShell {
+		if runtime.GOOS == "windows" {
+			args = append([]string{"cmd.exe", "/c"}, strings.Join(args, " "))
+		} else {
+			args = append([]string{"/bin/sh", "-c"}, strings.Join(args, " "))
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
