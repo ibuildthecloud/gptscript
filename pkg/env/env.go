@@ -3,7 +3,6 @@ package env
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -64,43 +63,4 @@ func AppendPath(env []string, binPath string) []string {
 		}
 	}
 	return newEnv
-}
-
-// Lookup will try to find bin in the PATH in env. It will refer to PATHEXT for Windows support.
-// If bin can not be resolved to anything the original bin string is returned.
-func Lookup(env []string, bin string) string {
-	if strings.Contains(bin, string(filepath.Separator)) {
-		return bin
-	}
-
-	for _, env := range env {
-		for _, prefix := range []string{"PATH=", "Path="} {
-			suffix, ok := strings.CutPrefix(env, prefix)
-			if !ok {
-				continue
-			}
-			log.Debugf("Looking for %s in %s", bin, suffix)
-			for _, path := range strings.Split(suffix, string(os.PathListSeparator)) {
-				testPath := filepath.Join(path, bin)
-
-				if stat, err := os.Stat(testPath); err == nil && !stat.IsDir() {
-					log.Debugf("Found %s for %s in %s", testPath, bin, suffix)
-					return testPath
-				}
-
-				for _, ext := range strings.Split(os.Getenv("PATHEXT"), string(os.PathListSeparator)) {
-					if ext == "" {
-						continue
-					}
-
-					if stat, err := os.Stat(testPath + ext); err == nil && !stat.IsDir() {
-						log.Debugf("Found %s for %s in %s", testPath+ext, bin, suffix)
-						return testPath + ext
-					}
-				}
-			}
-		}
-	}
-
-	return bin
 }

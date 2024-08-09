@@ -11,13 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/google/shlex"
 	"github.com/gptscript-ai/gptscript/pkg/counter"
 	"github.com/gptscript-ai/gptscript/pkg/env"
 	"github.com/gptscript-ai/gptscript/pkg/types"
@@ -254,28 +252,14 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 	interpreter, rest, _ := strings.Cut(tool.Instructions, "\n")
 	interpreter = strings.TrimSpace(interpreter)[2:]
 
-	args, err := shlex.Split(interpreter)
-	if err != nil {
-		return nil, nil, err
-	}
+	args := strings.Fields(interpreter)
 
-	envvars, err = e.getRuntimeEnv(ctx, tool, args, envvars)
+	envvars, err := e.getRuntimeEnv(ctx, tool, args, envvars)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	envvars, envMap := envAsMapAndDeDup(envvars)
-	for i, arg := range args {
-		args[i] = os.Expand(arg, func(s string) string {
-			return envMap[s]
-		})
-	}
-
-	// After we determined the interpreter we again interpret the args by env vars
-	args, err = replaceVariablesForInterpreter(interpreter, envMap)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	if runtime.GOOS == "windows" && (args[0] == "/bin/bash" || args[0] == "/bin/sh") {
 		args[0] = path.Base(args[0])
@@ -286,8 +270,7 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 	}
 
 	var (
-		cmdArgs = args[1:]
-		stop    = func() {}
+		stop = func() {}
 	)
 
 	if strings.TrimSpace(rest) != "" {
@@ -305,105 +288,30 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 			stop()
 			return nil, nil, err
 		}
-		cmdArgs = append(cmdArgs, f.Name())
+		args = append(args, f.Name())
 	}
 
-	// This is a workaround for Windows, where the command interpreter is constructed with unix style paths
-	// It converts unix style paths to windows style paths
-	if runtime.GOOS == "windows" {
-		parts := strings.Split(args[0], "/")
-		if parts[len(parts)-1] == "gptscript-go-tool" {
-			parts[len(parts)-1] = "gptscript-go-tool.exe"
-		}
-
-		args[0] = filepath.Join(parts...)
-	}
-
-	cmd := exec.CommandContext(ctx, env.Lookup(envvars, args[0]), cmdArgs...)
-	cmd.Env = compressEnv(envvars)
-	return cmd, stop, nil
-}
-
-func replaceVariablesForInterpreter(interpreter string, envMap map[string]string) ([]string, error) {
-	var parts []string
-	for i, part := range splitByQuotes(interpreter) {
-		if i%2 == 0 {
-			part = os.Expand(part, func(s string) string {
-				return envMap[s]
-			})
-			// We protect newly resolved env vars from getting replaced when we do the second Expand
-			// after shlex. Yeah, crazy. I'm guessing this isn't secure, but just trying to avoid a foot gun.
-			part = os.Expand(part, func(s string) string {
-				return "${__" + s + "}"
-			})
-		}
-		parts = append(parts, part)
-	}
-
-	parts, err := shlex.Split(strings.Join(parts, ""))
-	if err != nil {
-		return nil, err
-	}
-
-	for i, part := range parts {
-		parts[i] = os.Expand(part, func(s string) string {
-			if strings.HasPrefix(s, "__") {
-				return "${" + s[2:] + "}"
+	// translate UNIX style to Windows
+	for i, arg := range args {
+		args[i] = os.Expand(arg, func(s string) string {
+			if strings.HasPrefix(s, "!") {
+				return envMap[s[1:]]
 			}
-			return envMap[s]
+			if runtime.GOOS == "windows" {
+				return "%" + s + "%"
+			}
+			return "${" + s + "}"
 		})
 	}
 
-	return parts, nil
-}
-
-// splitByQuotes will split a string by parsing matching double quotes (with \ as the escape character).
-// The return value conforms to the following properties
-//  1. s == strings.Join(result, "")
-//  2. Even indexes are strings that were not in quotes.
-//  3. Odd indexes are strings that were quoted.
-//
-// Example: s = `In a "quoted string" quotes can be escaped with \"`
-//
-//	result = [`In a `, `"quoted string"`, ` quotes can be escaped with \"`]
-func splitByQuotes(s string) (result []string) {
-	var (
-		buf               strings.Builder
-		inEscape, inQuote bool
-	)
-
-	for _, c := range s {
-		if inEscape {
-			buf.WriteRune(c)
-			inEscape = false
-			continue
-		}
-
-		switch c {
-		case '"':
-			if inQuote {
-				buf.WriteRune(c)
-			}
-			result = append(result, buf.String())
-			buf.Reset()
-			if !inQuote {
-				buf.WriteRune(c)
-			}
-			inQuote = !inQuote
-		case '\\':
-			inEscape = true
-			buf.WriteRune(c)
-		default:
-			buf.WriteRune(c)
-		}
+	if runtime.GOOS == "windows" {
+		args[0] = strings.ReplaceAll(args[0], "/", "\\")
+		args = append([]string{"cmd.exe", "/c"}, strings.Join(args, " "))
+	} else {
+		args = append([]string{"/bin/sh", "-c"}, strings.Join(args, " "))
 	}
 
-	if buf.Len() > 0 {
-		if inQuote {
-			result = append(result, "")
-		}
-		result = append(result, buf.String())
-	}
-
-	return
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = compressEnv(envvars)
+	return cmd, stop, nil
 }
