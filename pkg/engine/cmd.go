@@ -244,6 +244,10 @@ func appendInputAsEnv(env []string, input string) []string {
 }
 
 func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.Tool, input string, useShell bool) (*exec.Cmd, func(), error) {
+	if runtime.GOOS == "windows" {
+		useShell = false
+	}
+
 	envvars := append(e.Env[:], extraEnv...)
 	envvars = appendInputAsEnv(envvars, input)
 	if log.IsDebug() {
@@ -303,7 +307,7 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 		args = append(args, f.Name())
 	}
 
-	// translate UNIX style to Windows
+	// Expand and/or normalize env references
 	for i, arg := range args {
 		args[i] = os.Expand(arg, func(s string) string {
 			if strings.HasPrefix(s, "!") {
@@ -311,9 +315,6 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 			}
 			if !useShell {
 				return envMap[s]
-			}
-			if runtime.GOOS == "windows" {
-				return "%" + s + "%"
 			}
 			return "${" + s + "}"
 		})
@@ -324,11 +325,9 @@ func (e *Engine) newCommand(ctx context.Context, extraEnv []string, tool types.T
 	}
 
 	if useShell {
-		if runtime.GOOS == "windows" {
-			args = append([]string{"cmd.exe", "/c"}, strings.Join(args, " "))
-		} else {
-			args = append([]string{"/bin/sh", "-c"}, strings.Join(args, " "))
-		}
+		args = append([]string{"/bin/sh", "-c"}, strings.Join(args, " "))
+	} else {
+		args[0] = env.Lookup(envvars, args[0])
 	}
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
